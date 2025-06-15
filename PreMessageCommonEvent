@@ -1,0 +1,107 @@
+/*:
+ * @plugindesc メッセージ表示前に指定したコモンイベントを実行します。
+ * @author 森の人
+ * @target MZ
+ * @url https://github.com/Hienohito/MZ_Plugin/PreMessageCommonEvent
+ *
+ * @param commonEventId
+ * @text 実行するコモンイベントID
+ * @desc メッセージ表示前に実行するコモンイベントのID。
+ * @type common_event
+ * @default 1
+ *
+ * @param enabledSwitchId
+ * @text 有効化スイッチID
+ * @desc このスイッチがONの時のみ機能します。0の場合は常に有効。
+ * @type switch
+ * @default 0
+ */
+
+(() => {
+    const pluginName = document.currentScript.src.split("/").pop().replace(/\.js$/, "");
+    const parameters = PluginManager.parameters(pluginName);
+    const preShowTextCommonEventId = parseInt(parameters.commonEventId) || 0;
+    const enabledSwitchId = parseInt(parameters.enabledSwitchId) || 0;
+
+    // 元の Game_Interpreter.prototype.executeCommand を保存
+    const _Game_Interpreter_executeCommand = Game_Interpreter.prototype.executeCommand;
+    // Game_Interpreter.prototype.update も保存
+    const _Game_Interpreter_update = Game_Interpreter.prototype.update;
+
+    // プラグインで管理するフェーズ用のプロパティを初期化
+    // undefined: 通常状態（前処理未開始）
+    // 'preCommonEventExecuting': メッセージ前のコモンイベント実行中（setupChild呼び出し後）
+    // 'messageCommandReady': メッセージ前のコモンイベントが完了し、メッセージコマンドを実行する準備ができた
+    Game_Interpreter.prototype._messagePreProcessPhase = undefined;
+
+    // Game_Interpreter.update をオーバーライドし、子イベントの完了をチェック
+    Game_Interpreter.prototype.update = function() {
+        // 元の update 処理を呼び出す
+        _Game_Interpreter_update.call(this);
+
+        // もしメッセージ前のコモンイベントが実行中で、かつ子インタープリターが完了したら
+        if (this._messagePreProcessPhase === 'preCommonEventExecuting' && this._childInterpreter === null) {
+            // フェーズをメッセージコマンド準備完了に移行
+            this._messagePreProcessPhase = 'messageCommandReady';
+            // 念のため待機モードを解除
+            this.setWaitMode("");
+        }
+    };
+
+    // Game_Interpreter.prototype.executeCommand をオーバーライド
+    Game_Interpreter.prototype.executeCommand = function() {
+        const command = this.currentCommand();
+
+        // 実行中のコマンドがメッセージ表示コマンド (コード 101) で、
+        // かつまだ前処理を開始していない場合（または前処理が完了している場合）
+        if (command && command.code === 101) {
+
+            // プラグイン有効化スイッチがOFFの場合、すぐに元の処理へ
+            if (enabledSwitchId > 0 && !$gameSwitches.value(enabledSwitchId)) {
+                // もし前処理フェーズ中にスイッチがOFFになったらリセット
+                if (this._messagePreProcessPhase !== undefined) {
+                    this._messagePreProcessPhase = undefined;
+                }
+                return _Game_Interpreter_executeCommand.call(this);
+            }
+
+            // メッセージ前のコモンイベントがまだ開始されていない、かつ戦闘中ではない場合
+            if (this._messagePreProcessPhase === undefined && !$gameParty.inBattle()) {
+                const commonEventData = preShowTextCommonEventId > 0 ? $dataCommonEvents[preShowTextCommonEventId] : null;
+                const isValidCommonEvent = commonEventData && Array.isArray(commonEventData.list);
+
+                if (isValidCommonEvent) {
+                    // コモンイベントを実行開始
+                    this._messagePreProcessPhase = 'preCommonEventExecuting';
+                    this.setupChild(commonEventData.list, this.eventId());
+                    // 子イベント実行中は、現在のコマンドの処理を一時停止し、次フレームで継続するために true を返す
+                    return true;
+                } else {
+                    // コモンイベントが設定されていないか、無効な場合は、そのままメッセージ表示コマンドを実行
+                    this._messagePreProcessPhase = 'messageCommandReady'; // このフェーズに移行させることで、次のステップで通常のコマンド実行パスに入る
+                }
+            }
+
+            // メッセージ前のコモンイベントが実行中の場合（子イベントが完了していない）
+            if (this._messagePreProcessPhase === 'preCommonEventExecuting') {
+                // 引き続き子イベントの完了を待つため true を返す
+                return true;
+            }
+
+            // メッセージ前のコモンイベントが完了し、メッセージコマンドを実行する準備ができた場合
+            if (this._messagePreProcessPhase === 'messageCommandReady') {
+                // フェーズをリセットし、元のメッセージコマンドを実行
+                this._messagePreProcessPhase = undefined;
+                return _Game_Interpreter_executeCommand.call(this);
+            }
+        }
+
+        // メッセージコマンド以外のコマンド、または上記のどの条件にも当てはまらない場合
+        // （例: 戦闘中のメッセージコマンド、メッセージコマンド以外の通常のイベントコマンド）
+        // フェーズ状態があればリセットして、元の executeCommand を呼び出す
+        if (this._messagePreProcessPhase !== undefined) {
+            this._messagePreProcessPhase = undefined;
+        }
+        return _Game_Interpreter_executeCommand.call(this);
+    };
+})();
