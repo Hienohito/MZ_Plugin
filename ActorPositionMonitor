@@ -3,7 +3,7 @@
  * @plugindesc パーティ内の指定アクターの隊列位置を監視し、変数に格納します。また、アクターのパーティ在籍状況に応じてスイッチを操作します。
  * @author 森の人
  * @version 1.1.0
- * @url https://github.com/Hienohito/ActorPositionMonitor.js/
+ * @url https://github.com/Hienohito/MZ_Plugin/ActorPositionMonitor
  *
  * @param positionMonitorSettings
  * @text 隊列位置監視設定
