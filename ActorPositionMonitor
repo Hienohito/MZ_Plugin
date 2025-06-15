@@ -1,0 +1,148 @@
+/*:ja
+ * @target MZ
+ * @plugindesc パーティ内の指定アクターの隊列位置を監視し、変数に格納します。また、アクターのパーティ在籍状況に応じてスイッチを操作します。
+ * @author 森の人
+ * @version 1.1.0
+ * @url https://github.com/Hienohito/ActorPositionMonitor.js/
+ *
+ * @param positionMonitorSettings
+ * @text 隊列位置監視設定
+ * @type struct<ActorPositionMonitorSetting>[]
+ * @desc 隊列位置を監視したいアクターとその格納変数、有効化スイッチのリスト。
+ *
+ * @help
+ * ActorPositionMonitor.js
+ *
+ * このプラグインは、パーティ内の特定アクターの隊列位置（リーダーは0、
+ * フォロワーは1, 2,...）をリアルタイムで監視し、その位置情報を指定の
+ * ゲーム変数に格納します。
+ * さらに、対象アクターがパーティに在籍しているかどうかによって、
+ * 指定されたゲームスイッチのON/OFFを自動で切り替えます。
+ * これにより、隊列位置や在籍状況に応じた独自の演出や
+ * 機能を実装するための土台を提供します。
+ *
+ * ■プラグインパラメータ:
+ *
+ * ◆ 隊列位置監視設定 (positionMonitorSettings)
+ * 監視したいアクターごとに以下の設定を行います。
+ *
+ * ・対象アクターID:
+ * 隊列位置を監視したいアクターのID。
+ *
+ * ・隊列位置格納変数ID:
+ * このアクターがパーティメンバーにいる場合、その隊列のインデックス
+ * (0: リーダー, 1: 1番目のフォロワー, ...) をこの変数に格納します。
+ * パーティにいない場合や、0を指定した場合は格納されません。
+ *
+ * ・在籍状況連動スイッチID:
+ * このアクターがパーティにいる時にONになり、いない時にOFFになるスイッチのID。
+ * 0を指定すると、このスイッチ操作は行われません。
+ *
+ * ■利用方法：
+ * このプラグインは、指定された変数の値を更新するのみで、直接的な
+ * 演出は行いません。格納された変数値やスイッチの状態を条件に、
+ * イベントコマンドや他のプラグインを用いて、独自の光効果、エフェクト、
+ * 行動などを実装してください。
+ *
+ * 例えば：
+ * - 変数100にアクターAの隊列位置が格納されているとして、
+ * イベントで「変数100が0なら（リーダーなら）特別なエフェクト」
+ * といった条件分岐を組むことができます。
+ * - スイッチ50がアクターBの在籍状況と連動しているとして、
+ * 「スイッチ50がONならアクターB用の特定のコモンイベントを実行」
+ * といった制御が可能です。
+ *
+ * ■注意：
+ * - 多くの対象アクターを設定しすぎたり、処理が重いイベントと組み合わせると、
+ * パフォーマンスに影響が出る可能性があります。
+ * - 他のプラグインがパーティやキャラクターの更新処理を大きく変更する場合、
+ * 競合する可能性があります。
+ *
+ * バージョン履歴:
+ * 1.1.0 - スイッチ制御機能を「パーティ在籍状況との連動」に変更。
+ * 1.0.0 - 複数アクターの隊列位置監視、変数格納、スイッチ制御機能を追加。
+ */
+
+/*~struct~ActorPositionMonitorSetting:
+ * @param actorId
+ * @text 対象アクターID
+ * @type actor
+ * @desc 隊列位置を監視したいアクターのID。
+ * @default 0
+ *
+ * @param positionVariableId
+ * @text 隊列位置格納変数ID
+ * @type variable
+ * @desc このアクターがパーティにいる場合、その隊列インデックスを格納する変数ID。0で格納しない。
+ * @default 0
+ *
+ * @param presenceSwitchId
+ * @text 在籍状況連動スイッチID
+ * @type switch
+ * @desc このアクターがパーティにいる時にON、いない時にOFFになるスイッチID。0で操作しない。
+ * @default 0
+ */
+
+(() => {
+    const pluginName = decodeURIComponent(document.currentScript.src.split("/").pop().replace(/\.js$/, ""));
+    const parameters = PluginManager.parameters(pluginName);
+
+    // パラメータをパースして、監視設定のリストを作成
+    const positionMonitorSettings = JSON.parse(parameters.positionMonitorSettings || "[]").map(settingString => {
+        const setting = JSON.parse(settingString);
+        return {
+            actorId: parseInt(setting.actorId) || 0,
+            positionVariableId: parseInt(setting.positionVariableId) || 0,
+            presenceSwitchId: parseInt(setting.presenceSwitchId) || 0 // 新しいスイッチID
+        };
+    }).filter(setting => setting.actorId > 0 && (setting.positionVariableId > 0 || setting.presenceSwitchId > 0)); // 変数かスイッチ、どちらか有効なら対象に
+
+    // Game_Map.prototype.update にフックして、ゲームの状態更新時に常にチェック
+    const _Game_Map_update = Game_Map.prototype.update;
+    Game_Map.prototype.update = function(sceneActive) {
+        _Game_Map_update.call(this, sceneActive); // 元の更新処理を呼び出す
+
+        // 戦闘中は処理しない
+        if ($gameParty.inBattle()) {
+            return;
+        }
+
+        // 各監視設定に基づいて隊列位置とスイッチをチェック
+        for (const setting of positionMonitorSettings) {
+            const { actorId, positionVariableId, presenceSwitchId } = setting;
+
+            const members = $gameParty.members();
+            let foundPosition = -1; // 見つからない場合は -1
+            let isInParty = false; // パーティにいるかどうか
+
+            // 隊列を前から順にチェック
+            for (let i = 0; i < members.length; i++) {
+                if (members[i].actorId() === actorId) {
+                    foundPosition = i; // 0: リーダー, 1: 1番目のフォロワー ...
+                    isInParty = true;
+                    break;
+                }
+            }
+
+            // --- 隊列位置格納変数の更新 ---
+            if (positionVariableId > 0) {
+                // リーダーを1、フォロワーを2,3...として変数に格納したい場合
+                const newPositionValue = (foundPosition === -1) ? 0 : (foundPosition + 1);
+
+                // 変数の値が変更された場合のみ更新してイベントの重複実行を防ぐ
+                if ($gameVariables.value(positionVariableId) !== newPositionValue) {
+                    $gameVariables.setValue(positionVariableId, newPositionValue);
+                }
+            }
+
+            // --- 在籍状況連動スイッチの操作 ---
+            if (presenceSwitchId > 0) {
+                const currentSwitchValue = $gameSwitches.value(presenceSwitchId);
+                if (isInParty !== currentSwitchValue) { // 現在の値と新しい値が異なる場合のみ操作
+                    $gameSwitches.setValue(presenceSwitchId, isInParty);
+                }
+            }
+        }
+    };
+
+})();
